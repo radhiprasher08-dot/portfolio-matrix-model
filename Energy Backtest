@@ -1,0 +1,105 @@
+"""
+Energy portfolio backtest (matrix-based).
+
+Portfolio: VLO, MPC, PSX (refiners) + PWR (grid infrastructure)
+Benchmarks: XLE (energy sector ETF), SPY (S&P 500)
+
+Setup:
+    pip install yfinance pandas numpy matplotlib
+Run:
+    python energy_backtest.py
+"""
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+
+# --------------------------------
+TICKERS = ["VLO", "MPC", "PSX", "PWR"]
+BENCHMARKS = ["XLE", "SPY"]
+WEIGHTS = np.array([0.25, 0.25, 0.25, 0.25])  # equal weight, must sum to 1
+START = "2023-10-01"                          # ~3 years; pull it back for a longer test
+PERIODS_PER_YEAR = 12                         # monthly data
+# ------------------------------------------
+
+def get_monthly_returns(tickers, start):
+    """Download monthly adjusted prices and convert to simple returns."""
+    prices = yf.download(
+        tickers, start=start, interval="1mo", auto_adjust=True, progress=False
+    )["Close"]
+    prices = prices[tickers].dropna()
+    # drop the current partial month so the last return isn't incomplete
+    if prices.index[-1].month == pd.Timestamp.today().month and \
+       prices.index[-1].year == pd.Timestamp.today().year:
+        prices = prices.iloc[:-1]
+    return prices.pct_change().dropna()
+
+def max_drawdown(growth):
+    """Largest peak-to-trough drop of a growth-of-$1 series."""
+    running_peak = growth.cummax()
+    return (growth / running_peak - 1).min()
+
+def summarize(name, returns):
+    growth = (1 + returns).cumprod()
+    n = len(returns)
+    total = growth.iloc[-1] - 1
+    cagr = growth.iloc[-1] ** (PERIODS_PER_YEAR / n) - 1
+    vol = returns.std() * np.sqrt(PERIODS_PER_YEAR)
+    return {
+        "Name": name,
+        "Total return": total,
+        "CAGR": cagr,
+        "Volatility": vol,
+        "Max drawdown": max_drawdown(growth),
+    }
+
+def main():
+    assert abs(WEIGHTS.sum() - 1) < 1e-9, "Weights must sum to 1"
+    assert len(WEIGHTS) == len(TICKERS), "One weight per ticker"
+
+    # returns matrix R: rows = months, columns = stocks
+    R = get_monthly_returns(TICKERS, START)
+    bench = get_monthly_returns(BENCHMARKS, START)
+    common = R.index.intersection(bench.index)
+    R, bench = R.loc[common], bench.loc[common]
+
+    # --- matrix math ---
+    port_returns = pd.Series(R.values @ WEIGHTS, index=R.index, name="Portfolio")
+
+    cov_annual = R.cov().values * PERIODS_PER_YEAR
+    port_vol_matrix = np.sqrt(WEIGHTS @ cov_annual @ WEIGHTS)  # sqrt(w' * Sigma * w)
+
+    # --- results table ---
+    rows = [summarize("Portfolio (equal weight)", port_returns)]
+    for t in TICKERS:
+        rows.append(summarize(t, R[t]))
+    for b in BENCHMARKS:
+        rows.append(summarize(b, bench[b]))
+    results = pd.DataFrame(rows).set_index("Name")
+
+    pd.options.display.float_format = "{:.1%}".format
+    print(f"\nPeriod: {R.index[0].date()} to {R.index[-1].date()} ({len(R)} months)\n")
+    print(results)
+    print(f"\nPortfolio volatility from covariance matrix (w'Σw): {port_vol_matrix:.1%}")
+
+    print("\nCorrelation matrix:")
+    pd.options.display.float_format = "{:.2f}".format
+    print(R.corr())
+
+    # --- chart: growth of $1 ---
+    plt.figure(figsize=(9, 5))
+    (1 + port_returns).cumprod().plot(label="Portfolio", linewidth=2.5)
+    for b in BENCHMARKS:
+        (1 + bench[b]).cumprod().plot(label=b, linestyle="--")
+    plt.title("Growth of $1: energy portfolio vs. benchmarks")
+    plt.ylabel("Value ($)")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("energy_backtest.png", dpi=150)
+    print("\nSaved chart to energy_backtest.png")
+
+
+if __name__ == "__main__":
+    main()
